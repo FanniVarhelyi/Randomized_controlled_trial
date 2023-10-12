@@ -1,0 +1,321 @@
+---
+title: "Do climate resilient seeds hurt farmer profitability?"
+author: "Analysis of the results of a randomized controlled trial (synthetic data)"
+date: "Fanni Varhelyi"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r, message = FALSE, warning = FALSE, include=FALSE}
+
+## get libraries
+
+library(fBasics)
+library(ggplot2)
+library(grid)
+library(gridExtra)
+library(datasets)
+library(xtable)
+library(knitr)
+library(ivreg)
+library(statar)
+library(broom)
+library(data.table) 
+library(tidyverse)
+library(plm)
+library(miceadds)
+library(lmtest)
+library(multiwayvcov)
+library(fixest)
+library(haven)
+library(car)
+library(stargazer)
+library(lfe)
+
+
+```
+
+```{r, message = FALSE, warning = FALSE, include=FALSE}
+
+# get data and check some basic characteristics
+data=read.csv("seed_rct.csv")
+head(data)
+data_dim=dim(data)
+data_dim
+colnames(data)
+
+```
+**I. Introduction**  
+  
+Climate change is an immense danger to humanity with profound implications for all areas of our lives, including agriculture. As the planet warms, weather patterns will become more unpredictable, and extreme heat and drought will become more common phenomenons. In order to prepare for that, scientists developed a more resistant wheat seed that can withstand these effects better than traditional seeds. While the seed is better equipped to withstand climate change effects, this variant might also have an impact on farmer's earnings who use them. For these new seeds to be a sustainable, long-term solution, it is crucial to ensure farmers can still make a living wage from selling the crop from this new seed variant.  
+  
+To test for this, an experimental project was conducted involving 283 towns in a province. Farmers were randomly assigned to treatment or control group (given seeds or not), and treatment intensity varied within the treatment groups as well. Since the farmers were randomly assigned to these groups, we can assume that this is a random controlled trial - and we will be conducting further tests to ascertain this by checking if control and treatment groups are balanced and comparable.  
+  
+Using earnings data collected after this experiment was conducted, the goal of this analysis is to understand the effect the new seeds had on the income of the farmers. First, I will investigate the basic attributes of the study to ascertain if any elements of it seem out of order or not random, and adjust the data if needed based on my findings. After that, I will analyze the impact of the new seeds on farmer earnings, also looking at potential spillover effects.  
+  
+**II. Study set-up** 
+  
+As the farmers live in towns, we can understand these towns as clusters, and for precise analysis, I will use clustering on a town level when conducting all my analyses. I will also assume that earnings are in thousands of U.S. dollars. In this section, I will check three things. First, I will establish if the randomly assigned treatment and control groups are similar enough to be used as the basis of comparison. Then, I will check for attrition, and whether the attrition is random or not. Finally, I will conduct a permutation test to see if the results from the study are statistically unlikely to happen by random chance. If necessary, I will adjust the data using weights before moving on to the next section of analyzing the results.  
+  
+To begin, I checked if treatment and seed usage had a relationship with earnings, and found that both of these had a statistically significant relationship with earnings. Based on the results in Table 1, it seems that on average, farmers in the control group earn around \$10.12-10.22 thousand dollars, and being part of the treatment group increased this earning by \$0.15 ths, and using the new seeds increased it by \$0.25 thousand. These results indicate that some spillover happened, and some farmers not assigned to treatment also used the seeds.
+  
+```{r, message = FALSE, warning = FALSE}
+treat_earn <- felm(lnearnings ~treatment | 0 | 0 | town_id, data = data)
+seed_earn <-  felm(lnearnings ~uses_new_seeds | 0 | 0 | town_id, data = data)
+```
+
+```{r, message = FALSE, warning = FALSE, echo=FALSE, results='asis'}
+# create table in stargazer
+stargazer(treat_earn,seed_earn, type = "latex",title='Preliminary regression results', header=FALSE)
+```
+
+
+
+
+
+
+Before investigating these spillovers further, I checked if the control and treatment groups were balanced. To do this, I analyzed whether there's a statistically significant relationship between any known attribute of farmers and the treatment - namely, I checked this for household size, age, and marital status. Table 2 displays the results of this balance check, and shows that treatment and control groups are similar enough to call treatment assignment random, and continue with the analysis without any readjustments.
+
+
+```{r, message = FALSE, warning = FALSE}
+hhldcheck <- felm(hhld_size ~treatment | 0 | 0 | town_id, data = data)
+agecheck <-  felm(age_head_hhld ~treatment | 0 | 0 | town_id, data = data)
+maritalcheck <-  felm(married ~treatment | 0 | 0 | town_id, data = data)
+multicheck <-  felm(treatment ~hhld_size + age_head_hhld + married | 0 | 0 | 
+                      town_id, data = data)
+```
+
+```{r, message = FALSE, warning = FALSE, echo=FALSE, results='asis'}
+stargazer(hhldcheck,agecheck,maritalcheck,multicheck, type = "latex",title='Balance check', header=FALSE)
+```
+
+Next, I investigated attrition. About ~9.8% of farmers dropped out of this experiment, and this attrition appears to be correlated with treatment: control group participants were more likely to drop out, and this difference between the groups (around 2.2%) is statistically significant. 
+
+```{r, message = FALSE, warning = FALSE, include=FALSE}
+#Checking for missing values
+outcome_missing <- sum(is.na(data$lnearnings))
+missing_perc = outcome_missing/data_dim[1]
+
+#Checking for correlation between attrition and treatment
+data$attrition = ifelse(is.na(data$lnearnings), 1, 0)
+```
+```{r, message = FALSE, warning = FALSE}
+attrition_original <- felm(attrition ~treatment | 0 | 0 | town_id, data = data)
+```
+
+
+To address this imbalance in attrition, I trimmed the data to readjust the control and treatment group to ensure optimal results. To do this, I estimated the probability of dropping out, and kept only observations in treatment and control group that had similar probabilities of dropping out by trimming observations that had either high or low probabilities of attriting. While this ensured balance in the data, it also led to a large loss in the number observations (~18 ths observations remained out of ~71 ths) and thus a significant decrease in precision. As the difference between the attrition of the control and treatment groups was only ~2%, I decided to continue working with the original dataset and not trim it. The slight difference in attrition can be kept in mind that we might slightly overestimate the effect of treatment on income, but as the magnitude is small, this shouldn't affect the results by much. Table 3 displays the results of regressing attrition on treatment before and after trimming.
+
+
+```{r, message = FALSE, warning = FALSE, include=FALSE}
+######################################################################
+## Trimming 
+######################################################################
+#Regressing attrition on covariates
+trimreg <- lm(attrition ~ hhld_size + age_head_hhld + married, data = data)
+data$trim = predict(trimreg, newdata=data)
+
+#Defining the 5% and 95% of people that is most likely / least likely to attrite
+quantile <- quantile(data$trim,c(0.39,0.7))
+#Dropping the 5-5% most likely attriters
+newdata <- data%>%
+  subset(trim > quantile[1] & trim < quantile[2])
+
+## assessing attrition
+attrition_after_trim <- felm(attrition ~treatment | 0 | 0 | town_id, data = newdata)
+```
+```{r, message = FALSE, warning = FALSE, echo=FALSE, results='asis'}
+# create table in stargazer
+stargazer(attrition_original,attrition_after_trim, type = "latex",title='Attrition before and after trimming', header=FALSE)
+```
+
+Finally, I conducted a permutation test on the original dataset to check how likely it is that these results are only due to random chance. Based on the results on my permutation test, which can be seen in Figure 1, it is highly unlikely that these results are due to random chance. Thus, I will continue with my analysis as I checked if treatment assignment was random, ensured that control and treatment groups are comparable and balanced, and checked if the results are plausibly non random. While I did not correct for a slight difference in attrition, the magnitude of the difference is small enough that it can be disregarded.
+
+```{r, message = FALSE, warning = FALSE, include=FALSE}
+######################################################################
+## Permutation test 
+######################################################################
+
+reps = 1000 #A large number of repetition is used here to ensure credibility is sufficiently assessed
+obs=dim(data)[1]
+SampleObs = data
+CoefMatrix	= matrix(NA, reps, 1)	# Matrix to store our results.  
+for (ii in 1:reps){		## Create a loop to run the permutation test reps times
+  SampleObs = data
+  SampleObs$treattest = floor(runif(obs,min=0,max=2))
+  reg = lm.cluster(lnearnings ~treattest, data = SampleObs, cluster="town_id")
+  CoefMatrix[ii,1] = coefficients(reg)[2] 
+}
+#Checking for significance by investigating mean, SD, and T value; also checking fraction of estimates from the permutation test with higher estimated treatment effects that the estimate based on the actual data
+
+#mean, SD
+c(mean(CoefMatrix[,1]), sd(CoefMatrix[,1]))
+#T test
+tdiff = mean(CoefMatrix[,1])/sd(CoefMatrix[,1])
+tdiff
+#% of higher estimates
+df_coef <- data.frame(coef = CoefMatrix)
+df_coef$higher <- ifelse(df_coef$coef>0.153,1,0)
+sum(df_coef$higher)/dim(df_coef)[1]
+```
+```{r, message = FALSE, warning = FALSE, echo=FALSE}
+ggplot(df_coef, aes(x=coef)) +
+  geom_histogram(binwidth=0.003, color='black',fill='gray') +
+  geom_vline(xintercept = 0.153, linetype = 'dotted', color = 'red', size = 0.5) +
+  annotate('text',x=0.129, y=175, label="Original coef. estimate", color='red') +
+  labs(title='Figure 1: Permutation test distribution') +
+  scale_x_continuous(name="Coefficient estimate") +
+  scale_y_continuous(name='Distribution of estimates')
+
+```
+
+
+**III. Analysis**  
+  
+In my analysis, I checked for both the effect of being assigned to treatment and actually receiving treatment (i.e., using the seeds), and what were the implications of either. First of all, I checked for the effect treatment assignment had on earnings, or the intent to treat effect (ITT). Treatment resulted in a $0.153 ths or ~1.5% increase in earnings. The result is statistically significant, and while it's relatively small in magnitude, earnings are expressed as ln function of earnings. Table 4 displays the regression results. These results might slightly overestimate treatment impact as attrition was slightly higher in the control group.
+
+```{r, message = FALSE, warning = FALSE, include=FALSE}
+######################################################################
+## ITT
+######################################################################
+tempdata 	= data[data$attrition==0,]
+itt_treat_earn_noattrition <-  felm(lnearnings ~treatment | 0 | 0 | town_id, data = tempdata)
+```
+```{r, message = FALSE, warning = FALSE}
+itt_treat_earn <- felm(lnearnings ~treatment | 0 | 0 | town_id, data = data)
+```
+```{r, message = FALSE, warning = FALSE, echo=FALSE, results='asis'}
+stargazer(itt_treat_earn, type = "latex",title='ITT regression results', header=FALSE)
+```
+
+Next, I checked the treatment effect looking at everyone who used the treatment, i.e., the seeds, or the TOT effect. In theory, this could be quite different from treatment assignment due to noncompliance in both the treatment group and the control group. Table 5 displays the regression results: using the seeds resulted in a \$0.256 thousand increase in earnings. The difference between ITT and TOT indicates that some spillover happened, and farmers in either the control group or in the treatment groups where they were not assigned treatment used the seeds as well.
+
+```{r, message = FALSE, warning = FALSE, include=FALSE}
+######################################################################
+## TOT
+######################################################################
+#Check how being assigned to treatment correlated with actually receiving treatment
+#40% of control group received treatment and 100% of treatment group received treatment or equivalent of it
+#So there's no noncompliance with treatment group but there is compliance issues in control group
+fs_reg <-  felm(uses_new_seeds ~treatment | 0 | 0 | town_id, data = data)
+TOT_seed_earn <-  ivreg(lnearnings ~uses_new_seeds | treatment, data = data)
+#divide the coefficients or do the iv for the 'pure' effect - what is the real consequence
+
+#Use IV to tell it to rescale the coefficient
+```
+```{r, message = FALSE, warning = FALSE, echo=FALSE, results='asis'}
+stargazer(TOT_seed_earn, type = "latex",title='TOT regression results', header=FALSE)
+
+```
+The farmers in the experiment were assigned to four groups: Group 0 was onlt control, Group 1 was 25% treatment, group 2 was 50% treatment, and group 3 was 75% treatment. To assess spillover effects on different participants who were not intended to receive the treatment, I will take these groups into consideration.
+
+Table 6 displays the split between control and treatment group and the usage of the seeds. It seems like a significant number of farmers in the control group used the seeds. Similarly, some farmers in treatment groups where they were not assigned treatment also used the seeds. Noncompliance was not present in the treatment groups for farmers who were assigned treatment: all of them used the seeds.
+
+```{r, message = FALSE, warning = FALSE, echo=FALSE}
+table2 <- as.data.frame(tempdata %>% group_by(town_group,treatment,uses_new_seeds) %>% tally())
+```
+```{r, message = FALSE, warning = FALSE, echo=FALSE, results='asis'}
+stargazer(table2, summary=FALSE, type='latex', title='Spillover in groups', header=FALSE)
+```
+
+To further investigate this, I created indicator variables for being assigned treatment (T_) or control (SO_), and for being part of a specific treatment group (1,2, or 3). Table 7 displays the results of regressing these indicators on both earnings and seed usage. Seed usage shows that even in the pure control group, about 20% of farmers used the seeds. In groups 1-3, as treatment intensity increased, spillover increased as well: in group 1, ~49% of control assigned farmers used the seeds, in group 2, 59% of them did, and in group 3, ~80% of them did. All farmers assigned to treatment used the seeds. Similarly, the effect in income increased as the % of treated increased in the groups. All results are significant.
+
+```{r, message = FALSE, warning = FALSE, include=FALSE}
+######################################################################
+## Spillover, direct/indirect TOT 
+######################################################################
+data$T_1 <- ifelse(data$town_group == 1, ifelse(data$treatment==1,1,0), 0)
+data$T_2 <- ifelse(data$town_group == 2, ifelse(data$treatment==1,1,0), 0)
+data$T_3 <- ifelse(data$town_group == 3, ifelse(data$treatment==1,1,0), 0)
+
+data$SO_0 <- ifelse(data$town_group == 0, ifelse(data$treatment==0,1,0), 0)
+data$SO_1 <- ifelse(data$town_group == 1, ifelse(data$treatment==0,1,0), 0)
+data$SO_2 <- ifelse(data$town_group == 2, ifelse(data$treatment==0,1,0), 0)
+data$SO_3 <- ifelse(data$town_group == 3, ifelse(data$treatment==0,1,0), 0)
+
+
+outcome_grouped = lm.cluster(lnearnings ~ T_1 + T_2 + T_3 + SO_1 + SO_2 + SO_3, data=data, cluster='town_id')
+```
+```{r, message = FALSE, warning = FALSE}
+spillover <- felm(lnearnings ~T_1 + T_2 + T_3 + SO_1 + SO_2 + SO_3 | 0 | 0 | 
+                    town_id, data = data)
+spill2 <- felm(uses_new_seeds ~T_1 + T_2 + T_3 + SO_1 + SO_2 + SO_3 | 0 | 0 | 
+                 town_id, data = data)
+```
+```{r, message = FALSE, warning = FALSE, echo=FALSE, results='asis'}
+stargazer(spillover,spill2, type = "latex",title='Spillover regression results', header=FALSE)
+
+```
+
+Figure 2 and Figure 3 illustrates this effect on income across the different treatment groups. Overall, increasing treatment intensity directly did not affect earnings by much, the different group participants earned similarly. On the other hand, it had an impact indirectly: as treatment intensity increased, earnings on average also increased for those farmers who were in these groups but not assigned treatment. It is clear from Figure 4 why: as treatment intensity increased, not treated farmers were using the new types of seeds more intensely as well.
+
+```{r, message = FALSE, warning = FALSE, include=FALSE}
+ploto <-  data.frame(summary(outcome_grouped))
+ploto <- cbind(Coef = rownames(ploto), ploto)
+rownames(ploto) <- 1:nrow(ploto)
+
+
+ploto_direct <- ploto[2:4,]
+ploto_indirect <- ploto[5:7,]
+```
+```{r, message = FALSE, warning = FALSE, echo=FALSE}
+ggplot(ploto_direct,aes(x=Coef, y=Estimate))+
+  geom_errorbar(aes(x=Coef,ymin=Estimate-Std..Error, ymax=Estimate+Std..Error), color = "darkgrey", width = .20)+
+  geom_point(color='steelblue') +
+  scale_x_discrete(name="Treatment group in % treated in group",
+        labels=c("Group 1: 25%", "Group 2: 50%", "Group 3: 75%")) +
+  scale_y_continuous(name='Coefficient estimates for direct treatment')+
+  ggtitle("Figure 2: Direct treatment effects: \nIncreasing the percentage treated had minor or no effect on income")
+```
+
+```{r, message = FALSE, warning = FALSE, echo=FALSE}
+ggplot(ploto_indirect,aes(x=Coef, y=Estimate))+
+  geom_errorbar(aes(x=Coef,ymin=Estimate-Std..Error, ymax=Estimate+Std..Error), color = "darkgrey", width = .20)+
+  geom_point(color='steelblue') +
+  scale_x_discrete(name="Treatment group in % treated in group",
+        labels=c("Group 1: 25%", "Group 2: 50%", "Group 3: 75%")) +
+  scale_y_continuous(name='Coefficient estimates for direct treatment')+
+  ggtitle("Figure 3: Indirect treatment effects: \nIncreasing the percentage treated had substantial effect on income")
+```
+
+
+```{r, message = FALSE, warning = FALSE, include=FALSE}
+seeds_grouped = lm.cluster(uses_new_seeds ~ T_1 + T_2 + T_3 + SO_1 + SO_2 + SO_3, data=data, cluster='town_id')
+plot <-  data.frame(summary(seeds_grouped))
+plot <- cbind(Coef = rownames(plot), plot)
+rownames(plot) <- 1:nrow(plot)
+
+
+plot_direct <- plot[2:4,]
+plot_indirect <- plot[5:7,]
+```
+```{r, message = FALSE, warning = FALSE, include=FALSE}
+ggplot(plot_direct,aes(x=Coef, y=Estimate))+
+  geom_errorbar(aes(x=Coef,ymin=Estimate-Std..Error, ymax=Estimate+Std..Error), color = "darkgrey", width = .20)+
+  geom_point(color='steelblue') +
+  scale_x_discrete(name="Treatment group in % treated in group",
+        labels=c("Group 1: 25%", "Group 2: 50%", "Group 3: 75%")) +
+  scale_y_continuous(name='Coefficient estimates for indirect treatment')+
+  ggtitle("Direct treatment effects: \nIncreasing the percentage treated had no effect on seed usage")
+```
+
+
+```{r, message = FALSE, warning = FALSE, echo=FALSE}
+ggplot(plot_indirect,aes(x=Coef, y=Estimate))+
+  geom_errorbar(aes(x=Coef,ymin=Estimate-Std..Error, ymax=Estimate+Std..Error), color = "darkgrey", width = .20)+
+  geom_point(color='steelblue') +
+  scale_x_discrete(name="Treatment group in % treated in group",
+        labels=c("Group 1: 25%", "Group 2: 50%", "Group 3: 75%")) +
+  scale_y_continuous(name='Coefficient estimates for indirect treatment')+
+  ggtitle("Figure 4: Indirect treatment effects: \nIncreasing the percentage treated had substantial effect on seed usage")
+```
+
+**IV. Conclusion**  
+
+To conclude, my analysis showed a relatively small, but positive impact on earnings when using the seeds: about \$0.25 thousand increase on earnings. There was also significant spillover even for the pure control group, and this spillover increased with treatment intensity. About 20-80% of farmers assigned to control received treatment as treatment intensity increased from 0 to 75%, and there was no noncompliance in treatment. Thus, my finding is that the new climate resistant seed is a viable alternative to the current variant, as it increased earnings, and likeliness of usage was relatively high even in control groups. 
+
+
